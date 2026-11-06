@@ -13,6 +13,9 @@ extern "C" {
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <stdexcept>
+#include <string>
 
 #include "bank.h"
 
@@ -49,38 +52,30 @@ void SetMonitor(FILE *f)
 
 BIGNUM *ReadNumber(BIO *in,const char *szTitle)
     {
-    char szLine[10240];
-    unsigned char aucBN[1024];
-    int nTLen=strlen(szTitle);
-
-    BIO_gets(in,szLine,sizeof szLine-1);
-    if(strncmp(szLine,szTitle,nTLen))
-	{
-	fprintf(stderr,"Got %s, expected %s\n",szLine,szTitle);
-	assert(!"Unexpected input");
-	return NULL;
-	}
-    BIGNUM *bn=BN_new();
-
-    int n=strcspn(szLine+nTLen,"\r\n");
-    szLine[nTLen+n]='\0';
-    if(n&1)
-	{
-	memmove(szLine+nTLen+1,szLine+nTLen,n+1);
-	szLine[nTLen]='0';
-	}
-
-    for(n=0 ; szLine[nTLen+n*2] ; ++n)
-	{
-	int h;
-
-	sscanf(&szLine[nTLen+n*2],"%02x",&h);
-	aucBN[n]=(unsigned char)h;
-	}
-
-    BN_bin2bn(aucBN,n,bn);
-
-    return bn;
+    // Preserve the former 1024-byte numeric limit without writing past it.
+    // In particular, old broken mints containing "(null)" must never become
+    // small private keys through unchecked sscanf conversions.
+    char line[4096];
+    const int count=BIO_gets(in,line,sizeof line);
+    if(count <= 0)
+        throw std::runtime_error("Missing Lucre number");
+    std::string text(line,static_cast<std::size_t>(count));
+    const std::size_t titleLength=strlen(szTitle);
+    if(text.compare(0,titleLength,szTitle) != 0)
+        throw std::runtime_error("Unexpected Lucre number label");
+    text.erase(0,titleLength);
+    if(!text.empty() && text.back() == '\n') text.pop_back();
+    if(!text.empty() && text.back() == '\r') text.pop_back();
+    if(text.empty() || text.size() > 2048 ||
+       text.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+        throw std::runtime_error("Invalid Lucre hexadecimal number");
+    BIGNUM *number=NULL;
+    if(BN_hex2bn(&number,text.c_str()) != static_cast<int>(text.size()))
+        {
+        BN_free(number);
+        throw std::runtime_error("Unable to parse Lucre number");
+        }
+    return number;
     }
 
 void DumpNumber(BIO *out,const char *szTitle,const BIGNUM *bn,
@@ -119,10 +114,19 @@ void HexDump(const char *szTitle,const unsigned char *acBuf,int nLength)
 
 PublicBank::PublicBank(Bank &bank)
     {
-    m_pDH=DH_new();
-    m_pDH->g=BN_dup(bank.g());
-    m_pDH->p=BN_dup(bank.p());
-    m_pDH->pub_key=BN_dup(bank.pub_key());
+    std::unique_ptr<DH, decltype(&DH_free)> dh(DH_new(), DH_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> prime(BN_dup(bank.p()), BN_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> generator(BN_dup(bank.g()), BN_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> publicKey(BN_dup(bank.pub_key()), BN_free);
+    if(!dh || !prime || !generator || !publicKey ||
+       !DH_set0_pqg(dh.get(), prime.get(), NULL, generator.get()))
+        throw std::runtime_error("Unable to copy mint parameters");
+    prime.release();
+    generator.release();
+    if(!DH_set0_key(dh.get(), publicKey.get(), NULL))
+        throw std::runtime_error("Unable to copy mint public key");
+    publicKey.release();
+    m_pDH=dh.release();
     }
 
 void Bank::cb(int n, int, void * /*arg*/)
@@ -178,7 +182,10 @@ void Bank::WriteBIO(BIO *bio)
 void Bank::ReadBIO(BIO *bio)
     {
     PublicBank::ReadBIO(bio);
-    m_pDH->priv_key=ReadNumber(bio,"private=");
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> privateKey(ReadNumber(bio,"private="), BN_free);
+    if(!privateKey || !DH_set0_key(m_pDH, NULL, privateKey.get()))
+        throw std::runtime_error("Unable to load mint private key");
+    privateKey.release();
     }
 
 void PublicBank::WriteBIO(BIO *bio)
@@ -190,11 +197,20 @@ void PublicBank::WriteBIO(BIO *bio)
 
 void PublicBank::ReadBIO(BIO *bio)
     {
-    m_pDH=DH_new();
-
-    m_pDH->g=ReadNumber(bio,"g=");
-    m_pDH->p=ReadNumber(bio,"p=");
-    m_pDH->pub_key=ReadNumber(bio,"public=");
+    std::unique_ptr<DH, decltype(&DH_free)> dh(DH_new(), DH_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> generator(ReadNumber(bio,"g="), BN_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> prime(ReadNumber(bio,"p="), BN_free);
+    std::unique_ptr<BIGNUM, decltype(&BN_free)> publicKey(ReadNumber(bio,"public="), BN_free);
+    if(!dh || !prime || !generator || !publicKey ||
+       !DH_set0_pqg(dh.get(), prime.get(), NULL, generator.get()))
+        throw std::runtime_error("Unable to load mint parameters");
+    prime.release();
+    generator.release();
+    if(!DH_set0_key(dh.get(), publicKey.get(), NULL))
+        throw std::runtime_error("Unable to load mint public key");
+    publicKey.release();
+    DH_free(m_pDH);
+    m_pDH=dh.release();
 
     Dump();
     }
