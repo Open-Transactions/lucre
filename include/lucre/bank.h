@@ -6,36 +6,6 @@
 #include <memory.h>
 #include <assert.h>
 
-#if OPENSSL_VERSION_NUMBER > 0x10100000L
-struct dh_st {
-    /*
-     * This first argument is used to pick up errors when a DH is passed
-     * instead of a EVP_PKEY
-     */
-    int pad;
-    int version;
-    BIGNUM *p;
-    BIGNUM *g;
-    long length;                /* optional */
-    BIGNUM *pub_key;            /* g^x % p */
-    BIGNUM *priv_key;           /* x */
-    int flags;
-    BN_MONT_CTX *method_mont_p;
-    /* Place holders if we want to do X9.42 DH */
-    BIGNUM *q;
-    BIGNUM *j;
-    unsigned char *seed;
-    int seedlen;
-    BIGNUM *counter;
-    int references;
-    CRYPTO_EX_DATA ex_data;
-    const DH_METHOD *meth;
-    ENGINE *engine;
-    CRYPTO_RWLOCK *lock;
-};
-#include <openssl/ossl_typ.h>
-#endif
-
 #ifdef _WIN32
 #include <malloc.h>
 #endif
@@ -81,18 +51,18 @@ public:
     ~PublicBank()
 	{ DH_free(m_pDH); }
     const BIGNUM *p() const
-	{ return m_pDH->p; }
-    /*const*/ BIGNUM *g() // regrettably not const, coz C doesn't support mutable
-	{ return m_pDH->g; }
-    /*const*/ BIGNUM *pub_key() // see above
-	{ return m_pDH->pub_key; }
+	{ const BIGNUM *value=NULL; DH_get0_pqg(m_pDH,&value,NULL,NULL); return value; }
+    const BIGNUM *g() const
+	{ const BIGNUM *value=NULL; DH_get0_pqg(m_pDH,NULL,NULL,&value); return value; }
+    const BIGNUM *pub_key() const
+	{ const BIGNUM *value=NULL; DH_get0_key(m_pDH,&value,NULL); return value; }
     void WriteBIO(BIO *bio);
     void ReadBIO(BIO *bio);
     void Dump()
 	{
-	DumpNumber("p=        ",m_pDH->p);
-	DumpNumber("g=        ",m_pDH->g);
-	DumpNumber("g^k=      ",m_pDH->pub_key);
+	DumpNumber("p=        ",p());
+	DumpNumber("g=        ",g());
+	DumpNumber("g^k=      ",pub_key());
 	}
     int CoinLength() const
 	{
@@ -113,7 +83,7 @@ public:
 	assert(nPrimeLength >= MIN_COIN_LENGTH+DIGEST_LENGTH);
 	m_pDH=DH_generate_parameters(nPrimeLength*8,DH_GENERATOR_5,cb,NULL);
 	assert(m_pDH);
-	assert(BN_num_bytes(m_pDH->p) == nPrimeLength);  // can this fail? i.e. does OpenSSL check for length when generating?
+	assert(BN_num_bytes(p()) == nPrimeLength);  // can this fail? i.e. does OpenSSL check for length when generating?
 	int nRet=DH_generate_key(m_pDH);
 	assert(nRet);
 	m_ctx=NULL;
@@ -133,10 +103,10 @@ public:
     void Dump()
 	{
 	PublicBank::Dump();
-	DumpNumber("k=        ",m_pDH->priv_key);
+	DumpNumber("k=        ",priv_key());
 	}
-    const BIGNUM *priv_key()
-	{ return m_pDH->priv_key; }
+    const BIGNUM *priv_key() const
+	{ const BIGNUM *value=NULL; DH_get0_key(m_pDH,NULL,&value); return value; }
     /*const*/ BIGNUM *SignRequest(PublicCoinRequest &req);
     boolean Verify(Coin &coin);
     void WriteBIO(BIO *bio);
